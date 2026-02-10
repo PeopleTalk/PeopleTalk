@@ -1,72 +1,105 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, onSnapshot, addDoc, serverTimestamp, query, orderBy, where, doc, deleteDoc } from 'firebase/firestore';
 
-// Main App component for the social media platform
+const countries = [
+  { name: 'All', emoji: '🌍' },
+  { name: 'USA', emoji: '🇺🇸' },
+  { name: 'India', emoji: '🇮🇳' },
+  { name: 'Canada', emoji: '🇨🇦' },
+  { name: 'UK', emoji: '🇬🇧' },
+  { name: 'Germany', emoji: '🇩🇪' },
+  { name: 'Australia', emoji: '🇦🇺' },
+  { name: 'Brazil', emoji: '🇧🇷' },
+  { name: 'Japan', emoji: '🇯🇵' },
+];
+
+const trendingTopics = [
+  '#PeopleTalkLaunch',
+  '#CommunityVoices',
+  '#DesignInspiration',
+  '#TechStories',
+  '#WorldUpdates',
+];
+
+const suggestedFriends = [
+  { name: 'Maya Johnson', interest: 'Design • USA' },
+  { name: 'Arjun Patel', interest: 'Startups • India' },
+  { name: 'Liam Carter', interest: 'Travel • UK' },
+];
+
+const formatPostTime = (value) => {
+  if (!value?.toDate) return 'Just now';
+
+  const date = value.toDate();
+  const diffMs = Date.now() - date.getTime();
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+
+  if (diffMs < minute) return 'Just now';
+  if (diffMs < hour) return `${Math.floor(diffMs / minute)}m ago`;
+  if (diffMs < day) return `${Math.floor(diffMs / hour)}h ago`;
+
+  return date.toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+};
+
 const App = () => {
-  // Global variables provided by the environment
   const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
   const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
   const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-  // State variables for authentication and UI
   const [db, setDb] = useState(null);
-  const [auth, setAuth] = useState(null);
   const [userId, setUserId] = useState(null);
   const [userName, setUserName] = useState(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [loginName, setLoginName] = useState('');
 
-  // State variables for the main app
   const [posts, setPosts] = useState([]);
   const [newPostText, setNewPostText] = useState('');
-  const [selectedCountry, setSelectedCountry] = useState('USA');
+  const [selectedCountry, setSelectedCountry] = useState('All');
   const [isLoading, setIsLoading] = useState(true);
 
-  // Available countries for communities
-  const countries = [
-    { name: 'All', emoji: '🌎' },
-    { name: 'USA', emoji: '🇺🇸' },
-    { name: 'India', emoji: '🇮🇳' },
-    { name: 'Canada', emoji: '🇨🇦' },
-    { name: 'UK', emoji: '🇬🇧' },
-    { name: 'Germany', emoji: '🇩🇪' },
-    { name: 'Australia', emoji: '🇦🇺' },
-    { name: 'Brazil', emoji: '🇧🇷' },
-    { name: 'Japan', emoji: '🇯🇵' },
-  ];
-
-  // Initialize Firebase and set up authentication listener
   useEffect(() => {
-    try {
-      if (Object.keys(firebaseConfig).length > 0) {
+    const setup = async () => {
+      if (!Object.keys(firebaseConfig).length) {
+        setIsAuthReady(true);
+        setIsLoading(false);
+        return;
+      }
+
+      try {
         const app = initializeApp(firebaseConfig);
         const firestore = getFirestore(app);
         const firebaseAuth = getAuth(app);
+
         setDb(firestore);
-        setAuth(firebaseAuth);
 
         onAuthStateChanged(firebaseAuth, async (user) => {
           if (user) {
             setUserId(user.uid);
             setIsAuthReady(true);
+          } else if (initialAuthToken) {
+            await signInWithCustomToken(firebaseAuth, initialAuthToken);
           } else {
-            // Sign in anonymously
-            if (initialAuthToken) {
-              await signInWithCustomToken(firebaseAuth, initialAuthToken);
-            } else {
-              await signInAnonymously(firebaseAuth);
-            }
+            await signInAnonymously(firebaseAuth);
           }
         });
+      } catch (error) {
+        console.error('Firebase initialization error:', error);
+        setIsAuthReady(true);
+        setIsLoading(false);
       }
-    } catch (e) {
-      console.error("Firebase initialization error:", e);
-    }
-  }, []);
+    };
 
-  // Check for stored username and handle login flow
+    setup();
+  }, [firebaseConfig, initialAuthToken]);
+
   useEffect(() => {
     const storedName = localStorage.getItem('userName');
     if (storedName) {
@@ -74,79 +107,90 @@ const App = () => {
     }
   }, []);
 
-  // Fetch and listen for real-time post updates from Firestore
   useEffect(() => {
     if (!db || !userName) {
       setPosts([]);
+      setIsLoading(false);
       return;
     }
 
+    setIsLoading(true);
+
     const postsCollectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'posts');
-    let q = query(postsCollectionRef, orderBy('createdAt', 'desc'));
+    const baseQuery = selectedCountry === 'All'
+      ? query(postsCollectionRef, orderBy('createdAt', 'desc'))
+      : query(postsCollectionRef, where('country', '==', selectedCountry), orderBy('createdAt', 'desc'));
 
-    if (selectedCountry !== 'All') {
-      q = query(postsCollectionRef, where('country', '==', selectedCountry), orderBy('createdAt', 'desc'));
-    }
+    const unsubscribe = onSnapshot(
+      baseQuery,
+      (snapshot) => {
+        const fetched = snapshot.docs.map((snapshotDoc) => ({
+          id: snapshotDoc.id,
+          ...snapshotDoc.data(),
+        }));
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const fetchedPosts = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-      setPosts(fetchedPosts);
-      setIsLoading(false);
-    }, (error) => {
-      console.error("Error fetching posts:", error);
-      setIsLoading(false);
-    });
+        setPosts(fetched);
+        setIsLoading(false);
+      },
+      (error) => {
+        console.error('Error fetching posts:', error);
+        setIsLoading(false);
+      },
+    );
 
     return () => unsubscribe();
   }, [db, userName, selectedCountry, appId]);
 
-  // Handle new post submission
-  const handlePostSubmit = async (e) => {
-    e.preventDefault();
-    if (!newPostText.trim() || !userId || !userName || selectedCountry === 'All') {
+  const countryPostCount = useMemo(() => {
+    const counts = {};
+    posts.forEach((post) => {
+      counts[post.country] = (counts[post.country] || 0) + 1;
+    });
+    return counts;
+  }, [posts]);
+
+  const handlePostSubmit = async (event) => {
+    event.preventDefault();
+
+    if (!newPostText.trim() || !userId || !userName || selectedCountry === 'All' || !db) {
       return;
     }
 
     try {
       const postsCollectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'posts');
       await addDoc(postsCollectionRef, {
-        text: newPostText,
+        text: newPostText.trim(),
         country: selectedCountry,
         authorId: userId,
         authorName: userName,
         createdAt: serverTimestamp(),
       });
+
       setNewPostText('');
-    } catch (e) {
-      console.error("Error adding document: ", e);
+    } catch (error) {
+      console.error('Error adding document:', error);
     }
   };
 
-  // Handle post deletion
   const handleDeletePost = async (postId) => {
-    if (!userId) return;
+    if (!userId || !db) return;
 
     try {
       const postDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'posts', postId);
       await deleteDoc(postDocRef);
-    } catch (e) {
-      console.error("Error deleting post: ", e);
+    } catch (error) {
+      console.error('Error deleting post:', error);
     }
   };
 
-  // Handle anonymous login
-  const handleAnonymousLogin = (e) => {
-    e.preventDefault();
-    if (loginName.trim()) {
-      localStorage.setItem('userName', loginName);
-      setUserName(loginName);
-    }
+  const handleAnonymousLogin = (event) => {
+    event.preventDefault();
+    if (!loginName.trim()) return;
+
+    localStorage.setItem('userName', loginName.trim());
+    setUserName(loginName.trim());
   };
 
-  // Handle changing user
   const handleChangeUser = () => {
     localStorage.removeItem('userName');
     setUserName(null);
@@ -155,46 +199,41 @@ const App = () => {
 
   if (!isAuthReady) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-gray-950 text-white">
-        <div className="p-8 text-center rounded-lg shadow-lg bg-gray-900">
-          <svg className="animate-spin h-8 w-8 text-blue-500 mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-          </svg>
-          <p className="mt-4 text-sm font-medium text-gray-400">Connecting to the community...</p>
+      <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center">
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-8 text-center shadow-2xl backdrop-blur-xl">
+          <div className="mx-auto h-10 w-10 rounded-full border-4 border-blue-500 border-t-transparent animate-spin" />
+          <p className="mt-4 text-sm text-slate-300">Connecting you to People Talk...</p>
         </div>
       </div>
     );
   }
 
-  // Anonymous Login Page
   if (!userName) {
     return (
-      <div className="bg-gray-950 min-h-screen text-white font-sans flex flex-col items-center justify-center p-4">
-        <div className="w-full max-w-sm mx-auto p-6 bg-gray-900 rounded-2xl shadow-2xl space-y-6 border border-gray-800">
-          <div className="text-center space-y-2">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" className="w-12 h-12 text-blue-500 fill-current mx-auto">
-              <path d="M459.37 151.716c.325 4.548.325 9.119.325 13.69 0 138.72-105.583 298.56-298.559 298.56C82.607 464 15.61 445.097 0 416.096c34.789 4.686 62.915 11.233 93.666 8.35c24.97-1.898 48.913-7.567 72.585-16.517 4.965-1.92 9.878-3.927 14.67-6.046c18.59-8.157 37.152-17.726 55.451-28.799-31.429-1.399-59.507-10.468-84.34-27.14-16.295-10.978-31.549-24.814-45.182-41.246-1.745-2.071-3.468-4.227-5.127-6.425-24.636-2.583-49.882-12.793-71.398-31.144-14.787-12.56-28.106-27.526-39.754-44.59-18.067-27.42-32.951-57.145-42.508-88.751-2.909-9.522-5.518-19.125-7.85-28.84c-3.236-13.623-4.885-27.348-4.885-41.144 0-16.485 1.701-32.898 5.096-49.128 3.551-17.436 8.948-34.468 16.035-50.627 15.602-34.505 39.462-65.021 69.375-89.924C165.756 12.395 218.026-.002 272.913.003c40.098 0 78.435 8.955 114.717 26.17c-21.688 2.656-42.946 9.475-63.535 20.73-22.348 12.42-43.204 28.537-62.247 47.954 13.578 1.459 26.68 4.677 39.362 9.617 19.387 7.558 37.957 17.585 55.76 29.832 1.487 1.018 2.948 2.059 4.397 3.12 18.257 12.78 35.352 27.608 51.045 44.595 18.257 19.68 34.195 42.17 47.388 67.242 16.711 32.493 25.106 66.864 25.106 101.41 0 16.474-1.745 32.802-5.127 49.032-1.745 8.169-3.824 16.279-6.208 24.341l.001-.001c-3.791 12.607-8.311 25.045-13.435 37.106c-13.332 30.826-30.865 58.747-51.815 83.185-1.047 1.229-2.127 2.441-3.238 3.666z"/>
-            </svg>
-            <h1 className="text-3xl font-extrabold text-white">PeopleTalk</h1>
-            <p className="text-sm text-gray-400">Join the community anonymously</p>
+      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-blue-950 text-white flex items-center justify-center p-4">
+        <div className="w-full max-w-md rounded-3xl border border-slate-700/70 bg-slate-900/80 p-8 shadow-2xl backdrop-blur-xl">
+          <div className="text-center">
+            <p className="inline-flex items-center rounded-full border border-blue-400/30 bg-blue-500/20 px-3 py-1 text-xs font-semibold tracking-wide text-blue-200">
+              Smooth social experience
+            </p>
+            <h1 className="mt-4 text-4xl font-extrabold tracking-tight">People Talk</h1>
+            <p className="mt-2 text-sm text-slate-300">Share ideas with your community, instantly.</p>
           </div>
-          <form onSubmit={handleAnonymousLogin} className="space-y-4">
-            <div>
-              <input
-                type="text"
-                value={loginName}
-                onChange={(e) => setLoginName(e.target.value)}
-                placeholder="Enter your name"
-                className="w-full p-3 rounded-lg bg-gray-950 text-white placeholder-gray-500 border border-gray-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                required
-              />
-            </div>
+
+          <form onSubmit={handleAnonymousLogin} className="mt-8 space-y-4">
+            <input
+              type="text"
+              value={loginName}
+              onChange={(event) => setLoginName(event.target.value)}
+              placeholder="Choose a display name"
+              className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-white placeholder:text-slate-500 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-500/40"
+              required
+            />
             <button
               type="submit"
-              className="w-full py-3 rounded-lg font-bold text-white bg-blue-500 hover:bg-blue-600 shadow-md transition-colors duration-200"
+              className="w-full rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 py-3 font-bold shadow-lg transition hover:scale-[1.01] hover:from-blue-500 hover:to-indigo-500"
             >
-              Start Talking
+              Enter People Talk
             </button>
           </form>
         </div>
@@ -202,113 +241,151 @@ const App = () => {
     );
   }
 
-  // Main App Page
   return (
-    <div className="bg-gray-950 min-h-screen text-white font-sans flex flex-col items-center p-4 sm:p-8">
-      <div className="w-full max-w-2xl mx-auto space-y-6">
-        <header className="flex items-center justify-between mb-4">
-          <div className="flex items-center space-x-4">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" className="w-8 h-8 text-white fill-current">
-              <path d="M459.37 151.716c.325 4.548.325 9.119.325 13.69 0 138.72-105.583 298.56-298.559 298.56C82.607 464 15.61 445.097 0 416.096c34.789 4.686 62.915 11.233 93.666 8.35c24.97-1.898 48.913-7.567 72.585-16.517 4.965-1.92 9.878-3.927 14.67-6.046c18.59-8.157 37.152-17.726 55.451-28.799-31.429-1.399-59.507-10.468-84.34-27.14-16.295-10.978-31.549-24.814-45.182-41.246-1.745-2.071-3.468-4.227-5.127-6.425-24.636-2.583-49.882-12.793-71.398-31.144-14.787-12.56-28.106-27.526-39.754-44.59-18.067-27.42-32.951-57.145-42.508-88.751-2.909-9.522-5.518-19.125-7.85-28.84c-3.236-13.623-4.885-27.348-4.885-41.144 0-16.485 1.701-32.898 5.096-49.128 3.551-17.436 8.948-34.468 16.035-50.627 15.602-34.505 39.462-65.021 69.375-89.924C165.756 12.395 218.026-.002 272.913.003c40.098 0 78.435 8.955 114.717 26.17c-21.688 2.656-42.946 9.475-63.535 20.73-22.348 12.42-43.204 28.537-62.247 47.954 13.578 1.459 26.68 4.677 39.362 9.617 19.387 7.558 37.957 17.585 55.76 29.832 1.487 1.018 2.948 2.059 4.397 3.12 18.257 12.78 35.352 27.608 51.045 44.595 18.257 19.68 34.195 42.17 47.388 67.242 16.711 32.493 25.106 66.864 25.106 101.41 0 16.474-1.745 32.802-5.127 49.032-1.745 8.169-3.824 16.279-6.208 24.341l.001-.001c-3.791 12.607-8.311 25.045-13.435 37.106c-13.332 30.826-30.865 58.747-51.815 83.185-1.047 1.229-2.127 2.441-3.238 3.666z"/>
-            </svg>
-            <h1 className="text-3xl font-extrabold text-white">PeopleTalk</h1>
-          </div>
-          <button
-            onClick={handleChangeUser}
-            className="py-2 px-4 text-sm font-semibold rounded-full bg-red-600 hover:bg-red-700 text-white transition-colors duration-200"
-          >
-            Change User
-          </button>
-        </header>
-        <p className="text-sm text-gray-400 text-center mb-4">Hello, {userName}!</p>
-
-        <div className="flex justify-center mb-6">
-          <div className="flex flex-wrap gap-2 bg-gray-900 rounded-full p-1.5 shadow-xl border border-gray-800">
-            {countries.map((country) => (
-              <button
-                key={country.name}
-                onClick={() => setSelectedCountry(country.name)}
-                className={`flex items-center justify-center px-4 py-2 rounded-full text-sm font-semibold transition-colors duration-200
-                  ${selectedCountry === country.name ? 'bg-blue-500 text-white shadow' : 'text-gray-400 hover:text-white'}`}
-              >
-                <span className="text-lg mr-2">{country.emoji}</span>
-                {country.name}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="bg-gray-900 p-4 rounded-xl shadow-inner">
-          <form onSubmit={handlePostSubmit} className="space-y-3">
-            <textarea
-              value={newPostText}
-              onChange={(e) => setNewPostText(e.target.value)}
-              placeholder={`What's happening in ${selectedCountry === 'All' ? 'the world' : selectedCountry}...`}
-              rows="3"
-              className="w-full p-2 rounded-lg bg-gray-950 text-white placeholder-gray-500 border border-gray-800 focus:outline-none focus:ring-1 focus:ring-blue-500 resize-none"
-              required
-            ></textarea>
+    <div className="min-h-screen bg-slate-950 text-white">
+      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+        <header className="mb-6 rounded-2xl border border-slate-800 bg-slate-900/60 px-5 py-4 shadow-xl backdrop-blur">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h1 className="text-3xl font-black tracking-tight">People Talk</h1>
+              <p className="text-sm text-slate-300">Welcome back, {userName}. Your world is talking.</p>
+            </div>
             <button
-              type="submit"
-              disabled={isLoading || !newPostText.trim() || selectedCountry === 'All'}
-              className={`w-full py-2.5 rounded-lg font-bold text-white transition-all duration-300
-                ${(isLoading || !newPostText.trim() || selectedCountry === 'All') ? 'bg-blue-500 opacity-50 cursor-not-allowed' : 'bg-blue-500 hover:bg-blue-600 shadow-md'}`}
+              onClick={handleChangeUser}
+              className="rounded-xl border border-red-400/30 bg-red-500/20 px-4 py-2 text-sm font-semibold text-red-200 transition hover:bg-red-500/30"
             >
-              Post
+              Switch Profile
             </button>
-          </form>
-        </div>
+          </div>
+        </header>
 
-        {isLoading ? (
-          <div className="flex justify-center items-center py-10">
-            <svg className="animate-spin h-6 w-6 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-            <p className="ml-3 text-gray-400">Loading posts...</p>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {posts.length > 0 ? (
-              posts.map((post) => {
-                const postCountry = countries.find(c => c.name === post.country);
-                return (
-                  <div key={post.id} className="bg-gray-900 p-4 rounded-xl shadow-lg border border-gray-800 relative">
-                    <p className="text-gray-200">{post.text}</p>
-                    <div className="flex justify-between items-center mt-3 text-xs text-gray-500">
-                      <p className="font-medium flex items-center">
-                        <span className="text-lg mr-2">{postCountry?.emoji}</span>
-                        <span className="text-blue-400 font-semibold">{post.country}</span>
-                      </p>
-                      <p>
-                        <span className="font-mono text-gray-600">Posted by {post.authorName || 'Anonymous'}</span>
-                      </p>
-                    </div>
-                    {post.authorId === userId && (
-                      <button
-                        onClick={() => handleDeletePost(post.id)}
-                        className="absolute top-2 right-2 text-gray-600 hover:text-red-500 transition-colors duration-200"
-                        aria-label="Delete post"
-                      >
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                          <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm4 0a1 1 0 112 0v6a1 1 0 11-2 0V8z" clipRule="evenodd" />
-                        </svg>
-                      </button>
-                    )}
-                  </div>
-                )
-              })
+        <div className="grid gap-6 lg:grid-cols-[260px_minmax(0,1fr)_280px]">
+          <aside className="space-y-4">
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">Communities</h2>
+              <div className="mt-3 space-y-2">
+                {countries.map((country) => (
+                  <button
+                    key={country.name}
+                    onClick={() => setSelectedCountry(country.name)}
+                    className={`w-full rounded-xl px-3 py-2 text-left text-sm transition ${selectedCountry === country.name ? 'bg-blue-600/80 text-white shadow-md' : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700'}`}
+                  >
+                    <span className="mr-2">{country.emoji}</span>
+                    {country.name}
+                    {country.name !== 'All' && countryPostCount[country.name] ? (
+                      <span className="float-right rounded-full bg-black/30 px-2 py-0.5 text-xs">{countryPostCount[country.name]}</span>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">Trending Now</h2>
+              <ul className="mt-3 space-y-2 text-sm text-slate-200">
+                {trendingTopics.map((topic) => (
+                  <li key={topic} className="rounded-lg bg-slate-800/70 px-3 py-2">{topic}</li>
+                ))}
+              </ul>
+            </div>
+          </aside>
+
+          <main className="space-y-4">
+            <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 shadow-lg">
+              <form onSubmit={handlePostSubmit} className="space-y-3">
+                <textarea
+                  value={newPostText}
+                  onChange={(event) => setNewPostText(event.target.value)}
+                  rows="3"
+                  placeholder={selectedCountry === 'All' ? 'Select a community to post your update...' : `Share an update with ${selectedCountry}...`}
+                  className="w-full resize-none rounded-xl border border-slate-700 bg-slate-950/70 p-3 text-white placeholder:text-slate-500 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-500/40"
+                  required
+                />
+                <button
+                  type="submit"
+                  disabled={!newPostText.trim() || selectedCountry === 'All' || !db}
+                  className="w-full rounded-xl bg-blue-600 py-2.5 font-semibold transition enabled:hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Post to {selectedCountry}
+                </button>
+              </form>
+            </section>
+
+            {isLoading ? (
+              <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-8 text-center text-slate-300">
+                <div className="mx-auto h-8 w-8 rounded-full border-4 border-blue-500 border-t-transparent animate-spin" />
+                <p className="mt-3">Loading posts...</p>
+              </div>
+            ) : posts.length === 0 ? (
+              <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-8 text-center text-slate-300">
+                <p className="text-lg font-semibold">No posts yet.</p>
+                <p className="mt-1 text-sm text-slate-400">Be the first one to start the conversation in this community.</p>
+              </div>
             ) : (
-              <p className="text-center text-gray-500 py-10">
-                No posts found for this community. Be the first to share your story!
-              </p>
+              <section className="space-y-4">
+                {posts.map((post) => {
+                  const postCountry = countries.find((country) => country.name === post.country);
+                  return (
+                    <article key={post.id} className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 shadow-lg">
+                      <div className="mb-3 flex items-center justify-between">
+                        <div>
+                          <p className="text-sm font-semibold text-slate-100">{post.authorName || 'Anonymous User'}</p>
+                          <p className="text-xs text-slate-400">{formatPostTime(post.createdAt)}</p>
+                        </div>
+                        <div className="rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-200">
+                          {postCountry?.emoji} {post.country || 'Global'}
+                        </div>
+                      </div>
+
+                      <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-slate-100">{post.text}</p>
+
+                      <div className="mt-4 flex items-center justify-between border-t border-slate-800 pt-3 text-sm text-slate-400">
+                        <div className="space-x-4">
+                          <button className="transition hover:text-blue-300">👍 Like</button>
+                          <button className="transition hover:text-blue-300">💬 Comment</button>
+                          <button className="transition hover:text-blue-300">↗ Share</button>
+                        </div>
+                        {post.authorId === userId ? (
+                          <button
+                            onClick={() => handleDeletePost(post.id)}
+                            className="text-red-300 transition hover:text-red-200"
+                          >
+                            Delete
+                          </button>
+                        ) : null}
+                      </div>
+                    </article>
+                  );
+                })}
+              </section>
             )}
-          </div>
-        )}
+          </main>
+
+          <aside className="space-y-4">
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">People You May Know</h2>
+              <ul className="mt-3 space-y-3">
+                {suggestedFriends.map((person) => (
+                  <li key={person.name} className="rounded-xl bg-slate-800/70 p-3">
+                    <p className="font-semibold text-slate-100">{person.name}</p>
+                    <p className="text-xs text-slate-400">{person.interest}</p>
+                    <button className="mt-2 rounded-lg bg-blue-600 px-3 py-1 text-xs font-semibold transition hover:bg-blue-500">
+                      Follow
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 text-xs text-slate-400">
+              <p className="font-semibold text-slate-300">People Talk</p>
+              <p className="mt-1">A smooth social network experience inspired by modern community apps.</p>
+            </div>
+          </aside>
+        </div>
       </div>
     </div>
   );
 };
 
 export default App;
-
